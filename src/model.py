@@ -138,23 +138,22 @@ class BasicNetworkFreq(nn.Module):
         return self.layers(x)
 
 def posEncode(x, numFreq=16):
-    # Map x in R^{F x W} -> R^{F*(2*num_freqs+1) x W} 
+    # Map x in R^{F x W} -> R^{F*(2*num_freqs+1) x W}
     # this is only so that dot products can represent high frequency detail
     # more easily
-    F = x.shape[1]*(numFreq*2+1)
-    posEnc = torch.zeros((x.shape[0], F, x.shape[2], x.shape[3]), device=x.device)
+    B, C, H, W = x.shape
     # frequencies = 2*pi*2**i/2
-    freqs = [6.28318530718*(2**(i/2.0)) for i in range(-4,numFreq-4)]
-    for k in range(x.shape[1]):
-        for j in range(numFreq):
-            # don't blindly optimize this -- they need to be interleaved
-            # in case we ever use multihead attention
-            posEnc[:,(k*numFreq*2)+2*j] = torch.sin(freqs[j]*x[:,k])
-            posEnc[:,(k*numFreq*2)+2*j+1] = torch.cos(freqs[j]*x[:,k])
+    freqs = torch.tensor([6.28318530718*(2**(i/2.0)) for i in range(-4, numFreq-4)],
+                          device=x.device, dtype=x.dtype)
+
+    # angle[:, k, j] = freqs[j] * x[:, k]; interleave sin/cos per (k, j) -> matches the
+    # original per-channel loop ordering k*numFreq*2 + 2*j (+1 for cos)
+    angle = x.unsqueeze(2) * freqs.view(1, 1, numFreq, 1, 1)          # [B, C, numFreq, H, W]
+    periodic = torch.stack((torch.sin(angle), torch.cos(angle)), dim=3)  # [B, C, numFreq, 2, H, W]
+    periodic = periodic.reshape(B, C*numFreq*2, H, W)
 
     # add the feature at the end as a backup/safety
-    posEnc[:,(x.shape[1]*numFreq*2):] = x
-    return posEnc 
+    return torch.cat((periodic, x), dim=1)
 
 
 
@@ -419,6 +418,53 @@ class FreqClassNonReLU(nn.Module):
             nn.Conv2d(256, self.nOut, 1, padding=0)
         )
         self.classification_head = nn.Conv2d(256, self.nOut * self.n_bins, 1, padding=0)
+
+    def forward(self, x):
+        x = torch.pow(torch.clamp(x, 0, None), 0.5)
+        x = posEncode(x, self.nFreq)
+        features = self.backbone(x)
+        regression = self.regression_head(features)
+        classification = self.classification_head(features)
+        B, _, H, W = classification.shape
+        classification = classification.view(B, self.nOut, self.n_bins, H, W)
+        return regression, classification
+
+
+class FreqClassNonReLUWide(nn.Module):
+    """FreqClassNonReLU scaled up to ~10M params (~9.7x FreqClassNonReLU's ~1.05M
+    at n_bins=128). Identical architecture/forward/data pipeline -- only the
+    backbone/head channel widths change (128->720, 256->1440, a uniform ~5.6x
+    width multiplier), so this is a drop-in --model swap for the standard
+    training recipe (e.g. submit_bp_hof_resynth_chained.sh)."""
+    def __init__(self, nIn=6, nOut=26, nFreq=12, n_bins=64):
+        super().__init__()
+        self.name = "FreqClassNonReLUWide"
+        self.nFreq = nFreq
+        self.nIn = nIn
+        self.nOut = nOut
+        self.n_bins = n_bins
+        self.requires_basis = False
+
+        W0, W1 = 720, 1440
+        nChannels = self.nIn*(self.nFreq*2+1)
+        self.backbone = nn.Sequential(
+            nn.Conv2d(nChannels, W0, 1, padding=0, padding_mode='reflect'),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+            nn.Conv2d(W0, W1, 1, padding=0, padding_mode='reflect'),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+            nn.Conv2d(W1, W1, 1, padding=0, padding_mode='reflect'),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+            nn.Conv2d(W1, W1, 1, padding=0, padding_mode='reflect'),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+        )
+        self.regression_head = nn.Sequential(
+            nn.Conv2d(W1, self.nOut, 1, padding=0)
+        )
+        self.classification_head = nn.Conv2d(W1, self.nOut * self.n_bins, 1, padding=0)
 
     def forward(self, x):
         x = torch.pow(torch.clamp(x, 0, None), 0.5)

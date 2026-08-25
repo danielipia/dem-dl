@@ -145,31 +145,42 @@ class zarrDataset(Dataset):
         if self.dataset is None:
             x_path = os.path.join(self.data_path, f"{self.split}_x.zarr")
             y_path = os.path.join(self.data_path, f"{self.split}_y.zarr")
-            
+
             self.x = zarr.open(x_path, mode='r')
             self.y = zarr.open(y_path, mode='r')
-            
-            # validate shapes of x and y
-            for i in range(1, 4):
-                assert self.x.shape[i] == self.y.shape[i], f"Shape mismatch at dimension {i}"
-            
+
+            assert self.x.shape[3] == self.y.shape[3], "Patch count mismatch between X and Y"
+            x_h, y_h = self.x.shape[1], self.y.shape[1]
+            assert x_h % y_h == 0, f"Y spatial size {y_h} must divide X spatial size {x_h}"
+            # compact format: Y stored at native DEM resolution, upsample in __getitem__
+            # inflated format: Y already at X resolution (legacy, NaN-padded)
+            self.y_dec = x_h // y_h  # 1 = inflated (legacy), >1 = compact (new)
+
             # placeholder normalization
             if self.mean is None:
                 self.mean = np.zeros(self.x.shape[0]).astype(np.float32)
             if self.std is None:
                 self.std = np.ones(self.x.shape[0]).astype(np.float32)
-            
+
             self.dataset = True  # mark as initialized
 
     def __getitem__(self, idx):
         self._initialize_dataset()
-        
+
         dataX = self.x[:, :, :, idx]
         dataY = self.y[:, :, :, idx]
-        
+
+        # compact format: upsample Y to X resolution, placing values at every dec-th pixel
+        if self.y_dec > 1:
+            dec = self.y_dec
+            dataY_full = np.full(
+                (dataY.shape[0], self.x.shape[1], self.x.shape[2]), np.nan, dtype=np.float32)
+            dataY_full[:, ::dec, ::dec] = dataY
+            dataY = dataY_full
+
         # normalization
         dataX = (dataX - self.mean[:, None, None]) / self.std[:, None, None]
-        
+
         # preprocessing if specified
         if self.args and hasattr(self.args, 'preprocess'):
             if self.args.preprocess == 'sqrt':
@@ -178,7 +189,7 @@ class zarrDataset(Dataset):
             elif self.args.preprocess == 'max':
                 dataX = np.maximum(0, dataX)
                 dataY = np.maximum(0, dataY)
-        
+
         dataX = torch.from_numpy(dataX).float()
         dataY = torch.from_numpy(dataY).float()
 
@@ -189,7 +200,7 @@ class zarrDataset(Dataset):
         # change infs to 0s
         dataX[torch.isinf(dataX)] = 0.0
         dataY[torch.isinf(dataY)] = 0.0
-        
+
         return dataX, dataY
 
     def __len__(self):

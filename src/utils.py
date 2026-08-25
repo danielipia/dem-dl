@@ -4,7 +4,7 @@ import sys
 import sunpy.map
 import matplotlib.pyplot as plt
 import astropy.io.fits as fits
-from aiapy.calibrate.utils import get_pointing_table, get_correction_table, get_error_table
+from aiapy.calibrate.util import get_pointing_table, get_correction_table, get_error_table
 from aiapy.calibrate import register, update_pointing, degradation, estimate_error
 import astropy.units as u
 from types import SimpleNamespace
@@ -72,11 +72,38 @@ def processIndAIAData(datePath, args):
     # Now handle loading the data, updating the pointing, potential
     # deconvolving, and then registering the images
     print("Updating pointing and registering AIA maps")
-    pointing_table = get_pointing_table("JSOC", time_range=(AIAMaps[0].date - 12 * u.h, AIAMaps[0].date + 12 * u.h))
+    pointing_file = getattr(args, 'pointing_file', '')
+    if pointing_file and os.path.isfile(pointing_file):
+        if not hasattr(get_pointing_table, '_master_cache'):
+            from astropy.table import QTable
+            get_pointing_table._master_cache = QTable.read(pointing_file, format='ascii.ecsv')
+            print(f"loaded master pointing table from {pointing_file}")
+        t_start = AIAMaps[0].date - 12 * u.h
+        t_end = AIAMaps[0].date + 12 * u.h
+        mask = (get_pointing_table._master_cache['T_START'] >= t_start) & (get_pointing_table._master_cache['T_START'] <= t_end)
+        pointing_table = get_pointing_table._master_cache[mask]
+        print(f"using cached subset: {len(pointing_table)} entries for {AIAMaps[0].date}")
+    else:
+        pointing_table = get_pointing_table("JSOC", time_range=(AIAMaps[0].date - 12 * u.h, AIAMaps[0].date + 12 * u.h))
     
     print("Applying degradation correction")
-    # no deconvolution
-    AIAMaps = [register(update_pointing(m, pointing_table=pointing_table)) for m in AIAMaps]
+    deconvolve_method = getattr(args, 'deconvolve', 'none')
+    if deconvolve_method == 'hofmeister':
+        import sys as _sys
+        _hof_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'optimScripts', 'hofmeister_psf')
+        _sys.path.insert(0, _hof_dir)
+        from deconvolve_image import deconvolve_bid
+        AIAMaps = [update_pointing(m, pointing_table=pointing_table) for m in AIAMaps]
+        AIAMapsDecon = []
+        for i, (m, wl) in enumerate(zip(AIAMaps, wavelengths)):
+            psf_path = os.path.join(_hof_dir, f'psf_aia_{wl}.fits')
+            print(f"Hofmeister deconvolution: channel {i} ({wl}A)")
+            psf_data = fits.getdata(psf_path).astype(np.float32)
+            decon_data = deconvolve_bid(m.data.astype(np.float32), psf_data, use_gpu=True, large_psf=True)
+            AIAMapsDecon.append(sunpy.map.Map(decon_data, m.meta))
+        AIAMaps = [register(m) for m in AIAMapsDecon]
+    else:
+        AIAMaps = [register(update_pointing(m, pointing_table=pointing_table)) for m in AIAMaps]
 
     AIAErrors = []
     # regular photon noise error
