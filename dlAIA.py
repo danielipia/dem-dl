@@ -37,7 +37,7 @@ def pullData(targetBase, dt, account):
 def parseArgs():
     parser = argparse.ArgumentParser()
     parser.add_argument("target", help="directory to stage files")
-    parser.add_argument("ts", help="date/time to download in %%Y%%m%%d_%%H%%M format (20240520_1200)")
+    parser.add_argument("ts", help="date/time (example: 20240520_1200)")
     parser.add_argument("email", help="jsoc account email")
     return parser.parse_args()
 

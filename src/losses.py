@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import numpy as np
+import torch.nn.functional as F
 
 class MaskedMSELoss(nn.Module):
     # masked MSE loss for nans
@@ -154,4 +155,59 @@ class BarrierLoss(nn.Module):
         # lb: lower bound, shape [B, n_obs]
         # ub: upper bound, shape [B, n_obs]
         return barrier_loss_batch(x, self.D, aia_obs, lb, ub,
+                                  self.a_l2, self.a_l1, self.mu, self.alpha)
+
+
+def barrier_loss_batch_SiLU(x, D, I_obs, lb, ub, a_l2=0, a_l1=1.0, mu=1.0, alpha=0, mu_pos=0):
+    # x: [B, n_basis]
+    # D: [n_obs, n_temps]
+    # I_obs: [B, n_obs]
+    # lb, ub: [B, n_obs] lower and upper bounds for the observed data
+
+    # a_l2: regularization strength for L2
+    # a_l1: regularization strength for L1
+    # mu: barrier strength
+    # alpha: fit term weight
+
+    # L2 regularization
+    l2_term = 0.5 * a_l2 * torch.sum(x**2, dim=1)  # [B]
+
+    # L1 regularization
+    l1_term = a_l1 * torch.sum(torch.abs(x), dim=1)  # [B]
+
+    Dx = torch.matmul(x, D.T)  # [B, n_obs]
+
+    # barrier for x >= 0
+    barrier_x = mu_pos * torch.sum(F.silu(-x), dim=1)  # [B]
+    
+    # barrier for Dx >= lb
+    barrier_lb = mu * torch.sum(F.silu(lb - Dx)**2, dim=1)  # [B]
+    #barrier_lb = mu * torch.sum(nn.functional.softplus(lb - Dx), dim=1)  # [B]
+
+    # barrier for Dx <= ub
+    barrier_ub = mu * torch.sum(F.silu(Dx - ub)**2, dim=1)  # [B]
+    #barrier_ub = mu * torch.sum(nn.functional.softplus(Dx - ub), dim=1)  # [B]
+
+    # fit term
+    fit = alpha * torch.sum((Dx - I_obs)**2, dim=1)  # [B]
+
+    # final loss: shape [B], return mean for scalar loss
+    total_loss = l2_term + l1_term + barrier_x + barrier_lb + barrier_ub + fit
+    return total_loss.mean()
+
+class BarrierLoss_SiLU(nn.Module):
+    def __init__(self, D, R, B, args=None):
+        super().__init__()
+        self.D = D
+        self.R = R
+        self.B = B
+        self.a_l2 = args.alpha_l2
+        self.a_l1 = args.alpha_l1
+        self.mu = args.mu
+        self.alpha = args.alpha_fit
+
+    def forward(self, x, aia_obs, lb, ub):
+        # lb: lower bound, shape [B, n_obs]
+        # ub: upper bound, shape [B, n_obs]
+        return barrier_loss_batch_SiLU(x, self.D, aia_obs, lb, ub,
                                   self.a_l2, self.a_l1, self.mu, self.alpha)
