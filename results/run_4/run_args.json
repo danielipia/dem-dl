@@ -1,0 +1,22 @@
+{
+  "project_root": "'..'",
+  "rdata": "RData.npz",
+  "data_dir": "data\\DEMs\\train",
+  "val_file": null,
+  "val_frac": 0.0,
+  "model": "DemoModel",
+  "model_kwargs": "{}",
+  "no_softplus": false,
+  "loss": "BarrierLoss_SiLU",
+  "loss_kwargs": "{\"alpha_1\": 1.0, \"mu\": 1.0}",
+  "tolfac": 1.4,
+  "basis_alphas": "0.0_0.1_0.2",
+  "notrunc": false,
+  "output_dir": "./results/run_barrierSiLU_demo",
+  "epochs": 5000,
+  "batch_size": 128,
+  "lr": 1e-05,
+  "device": "cpu",
+  "checkpoint_every": 10,
+  "resume": false
+}
